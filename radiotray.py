@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import json
 import subprocess
 import sys
@@ -11,23 +10,28 @@ import re
 from PIL import Image, ImageDraw
 from PyQt5 import QtWidgets, QtGui, QtCore
 
-# Determine the appropriate command-line tool to use and the config-directory based on the operating system
-if platform.system() == "Windows":
-    player = "wmplayer.exe"
-    CONFDIR = os.environ["APPDATA"] + "/radiotray-py"
-elif platform.system() == "Darwin":
-    player = "afplay"
-    CONFDIR = os.environ["HOME"] + "/.config/radiotray-py"
-else:
-    player = "mpv"
-    CONFDIR = os.environ["HOME"] + "/.config/radiotray-py"
-    
+# Determine OS-specific configuration directory
+def get_config_dir():
+    """Returns the OS-appropriate path for storing application data."""
+    system = platform.system()
+    if system == "Windows":
+        base_dir = os.environ.get("APPDATA", os.path.expanduser("~"))
+        config_dir = os.path.join(base_dir, "radiotray-py")
+    elif system == "Darwin": # macOS
+        config_dir = os.path.expanduser("~/Library/Application Support/radiotray-py")
+    else: # Linux and others
+        base_dir = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+        config_dir = os.path.join(base_dir, "radiotray-py")
+
+    # Ensure the directory exists
+    os.makedirs(config_dir, exist_ok=True)
+    return config_dir
+
+CONFIG_DIR = get_config_dir()
+
 # Paths to your bookmarks.json and config.json files
-if not os.path.exists(CONFDIR):
-    os.makedirs(CONFDIR)
-os.chdir(CONFDIR)
-BOOKMARKS_FILE = "bookmarks.json"
-CONFIG_FILE = "config.json"
+BOOKMARKS_FILE = os.path.join(CONFIG_DIR, "bookmarks.json")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 # Global variables to keep track of the current process and station info
 current_process = None
@@ -41,6 +45,14 @@ stop_event = threading.Event()
 
 # Global variable to hold the BookmarkEditor window instance
 bookmark_editor_window = None
+
+# Determine the appropriate command-line tool to use based on the operating system
+if platform.system() == "Windows":
+    player = "wmplayer.exe"
+elif platform.system() == "Darwin":
+    player = "afplay"
+else:
+    player = "mpv"
 
 # Function to create waveform icons
 def create_waveform_icon(color):
@@ -102,21 +114,21 @@ def save_bookmarks(bookmarks):
         json.dump(bookmarks, f, indent=4)
 
 # Save the last played station URL and name to config.json
-def save_last_station(url, name):
-    """Saves the last played station to a config file."""
-    config = {"last_station": url, "last_station_name": name}
+def save_last_station(name):
+    """Saves the last played station name to a config file."""
+    config = {"last_station_name": name}
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f)
 
 # Load the last played station URL and name from config.json
-def load_last_station():
-    """Loads the last played station from a config file."""
+def load_last_station_name():
+    """Loads the last played station name from a config file."""
     try:
         with open(CONFIG_FILE, "r") as f:
             config = json.load(f)
-            return config.get("last_station"), config.get("last_station_name")
+            return config.get("last_station_name")
     except (FileNotFoundError, json.JSONDecodeError):
-        return None, None
+        return None
 
 def fetch_metadata_from_api(url):
     """Fetches song title from a JSON API URL."""
@@ -221,12 +233,29 @@ def monitor_metadata(url):
 
     print("Metadata thread stopped.")
 
+def find_url_by_name(name):
+    """Searches bookmarks for a station URL matching the given name."""
+    bookmarks = read_bookmarks()
+    for group in bookmarks:
+        for station in group.get("stations", []):
+            if station.get("name") == name:
+                return station.get("url")
+    return None
+
 # Launch the appropriate command-line tool to play the selected station URL
 def play_station(url, name):
     """Plays the selected station using the configured player."""
     global current_process, current_station_name, current_song_title, metadata_thread, player
     stop_current_station()
     current_song_title = None
+
+    # --- NEW: DYNAMIC DATE LOGIC ---
+    # Automatically replace $(date +%s) with the current Unix epoch timestamp
+    if "$(date +%s)" in url:
+        fresh_timestamp = str(int(time.time()))
+        url = url.replace("$(date +%s)", fresh_timestamp)
+        print(f"Dynamic timestamp placeholder detected. Generated fresh skey: {fresh_timestamp}")
+    # -------------------------------
 
     try:
         print(f"Playing station: {name} ({url})")
@@ -262,13 +291,13 @@ def play_station(url, name):
 
         # If the process is still running, we can assume it's playing.
         print("Playback started successfully.")
-        
+
         # Start the new, non-IPC metadata monitoring thread
         stop_event.clear()
         metadata_thread = threading.Thread(target=monitor_metadata, args=(url,), daemon=True)
         metadata_thread.start()
 
-        save_last_station(url, name)
+        save_last_station(name)
         current_station_name = name
         tray_icon.update_menu.emit()
 
@@ -283,17 +312,20 @@ def play_station(url, name):
 
 # Toggle playback on/off
 def toggle_playback():
-    """Toggles playback of the last played station."""
+    """Toggles playback of the last played station by looking up its URL in bookmarks."""
     global current_process, current_station_name
     if current_process:
-        print("Playback stopped via menu action.")
         stop_current_station()
         current_station_name = None
     else:
-        print("Toggling playback on.")
-        last_station, last_station_name = load_last_station()
-        if last_station:
-            play_station(last_station, last_station_name)
+        last_name = load_last_station_name()
+        if last_name:
+            # Look up the URL in bookmarks to get the $(date +%s) version
+            url = find_url_by_name(last_name)
+            if url:
+                play_station(url, last_name)
+            else:
+                print(f"Could not find bookmark for '{last_name}' to refresh URL.")
         else:
             print("No station was previously played.")
     tray_icon.update_menu.emit()
@@ -380,7 +412,7 @@ class TrayIcon(QtWidgets.QSystemTrayIcon):
             self.setIcon(QtGui.QIcon(green_waveform_icon))
         else:
             # Display the last played station name if available
-            last_url, last_name = load_last_station()
+            last_name = load_last_station_name()
             last_station_display = last_name if last_name else "Last Station"
             toggle_action = QtWidgets.QAction(f"Play {last_station_display}", menu)
             self.setIcon(QtGui.QIcon(red_waveform_icon))
