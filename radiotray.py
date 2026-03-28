@@ -380,7 +380,7 @@ class TrayIcon(QtWidgets.QSystemTrayIcon):
             else:
                 truncated_text = display_text[self.scroll_offset:end_index]
 
-            self.song_title_action.setText(truncated_text)
+            self.song_title_action.setText(truncated_text.replace("&", "&&"))
             self.scroll_offset = (self.scroll_offset + 1) % (len(display_text) + 3) # Add space for a small pause
         else:
             self.song_title_action.setText(display_text)
@@ -414,16 +414,15 @@ class TrayIcon(QtWidgets.QSystemTrayIcon):
             # Display the last played station name if available
             last_name = load_last_station_name()
             last_station_display = last_name if last_name else "Last Station"
-            toggle_action = QtWidgets.QAction(f"Play {last_station_display}", menu)
+            toggle_action = QtWidgets.QAction(f"Play {last_station_display.replace('&', '&&')}", menu)
             self.setIcon(QtGui.QIcon(red_waveform_icon))
 
         toggle_action.triggered.connect(toggle_playback)
         menu.addAction(toggle_action)
 
         # Current station action (disabled)
-        current_station_action = QtWidgets.QAction(
-            " " * 4 + (current_station_name if current_station_name else "No Station Playing"), menu
-        )
+        display_curr = current_station_name.replace("&", "&&") if current_station_name else "No Station Playing"
+        current_station_action = QtWidgets.QAction(" " * 4 + display_curr, menu)
         current_station_action.setEnabled(False)
         menu.addAction(current_station_action)
 
@@ -443,9 +442,16 @@ class TrayIcon(QtWidgets.QSystemTrayIcon):
         # Station bookmarks
         bookmarks = read_bookmarks()
         for group in bookmarks:
-            group_menu = menu.addMenu(group["group"])
+            # Escape & in Group names
+            group_name = group["group"].replace("&", "&&")
+            group_menu = menu.addMenu(group_name)
+
             for station in group["stations"]:
-                play_action = QtWidgets.QAction(station["name"], group_menu)
+                # Escape & in Station names for display only
+                display_name = station["name"].replace("&", "&&")
+
+                play_action = QtWidgets.QAction(display_name, group_menu)
+                # Keep the ORIGINAL station["name"] for the play_station function
                 play_action.triggered.connect(
                     lambda checked, url=station["url"], name=station["name"]: play_station(url, name)
                 )
